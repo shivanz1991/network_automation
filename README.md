@@ -28,7 +28,6 @@ network_automation/
 │   └── provision_site.py
 ├── templates/         Jinja2 config templates for network devices
 ├── playbooks/         Ansible playbooks for config deployment
-├── inventory/         Ansible inventory configuration (NetBox dynamic)
 ├── scripts/           Standalone utility scripts (validation, audit, etc.)
 └── requirements.txt   Python dependencies
 ```
@@ -80,11 +79,6 @@ Planned playbooks:
 - `site_deploy.yml` — Generate and push configs for all devices at a site
 - `vlan_update.yml` — Push VLAN changes across a site
 - `validate.yml` — Pre/post change validation
-
-### inventory/
-
-Ansible dynamic inventory configuration pointing at NetBox.
-No static host files — everything is discovered from NetBox at runtime.
 
 ### scripts/
 
