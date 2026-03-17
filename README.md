@@ -40,16 +40,20 @@ sanctioned way to bulk-provision network data.
 
 | Script | Purpose |
 |--------|---------|
-| `provision_site.py` | Provision a new site with all derived addressing, VLANs, devices, and IPs |
+| `provision_site.py` | Reconcile NetBox state with `sites.yml` — creates, updates, or removes sites |
 
-**Usage:**
+**Workflow:**
 
 ```bash
-# Preview what will be created (no changes)
-python3 netbox/provision_site.py --site EQ4LON --site-id 64 --dry-run
+# 1. Edit sites.yml — add, modify, or remove sites/devices
+# 2. Preview changes
+python3 netbox/provision_site.py --dry-run
 
-# Provision for real
-python3 netbox/provision_site.py --site EQ4LON --site-id 64 --token $NETBOX_TOKEN
+# 3. Apply — creates a NetBox branch for peer review
+python3 netbox/provision_site.py
+
+# 4. Review in NetBox UI, get approval, then merge
+python3 netbox/provision_site.py --merge <BRANCH_ID>
 ```
 
 **Environment variables:**
@@ -112,3 +116,5 @@ Key standards documents:
 - **NetBox is the source of truth** — Ansible queries it at runtime, not static vars
 - **Dry-run first** — all scripts support `--dry-run` to preview changes
 - **One site_id, everything derived** — a single even integer (0–190) determines all addressing
+- **Branch workflow** — all NetBox changes go through a branch for peer review before merging to main
+- **sites.yml is the intent** — declares what exists; NetBox holds the complete derived state

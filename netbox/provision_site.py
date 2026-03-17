@@ -1,29 +1,42 @@
 #!/usr/bin/env python3
 """
-Provision a new site in NetBox from a site_code and site_id.
+Provision and reconcile NetBox state from sites.yml.
 
-All addressing is deterministically derived from the site_id using the
-formulas defined in network_standards/. This script is the bridge between
-the standards repo and NetBox.
+Reads the desired state from sites.yml, derives all addressing from the
+formulas in network_standards/, and ensures NetBox matches — creating,
+updating, or removing objects as needed.
+
+All changes are made inside a NetBox branch. The branch must be manually
+reviewed and merged via the NetBox UI or API.
 
 Usage:
-    python3 provision_site.py --site EQ4LON --site-id 64 --url http://192.168.0.36 --token <API_TOKEN>
+    python3 netbox/provision_site.py --dry-run
+    python3 netbox/provision_site.py
+    python3 netbox/provision_site.py --branch "add-eq4lon"
+    python3 netbox/provision_site.py --merge  # merge the branch after review
 
-Environment variables (alternative to CLI flags):
-    NETBOX_URL    - NetBox base URL
-    NETBOX_TOKEN  - API authentication token
+Environment variables:
+    NETBOX_URL    - NetBox base URL (default: http://192.168.0.36)
+    NETBOX_TOKEN  - API authentication token (required)
 """
 
 import argparse
 import ipaddress
 import os
 import sys
+import time
 
-import pynetbox
+import requests
+import yaml
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(SCRIPT_DIR)
+SITES_FILE = os.path.join(REPO_DIR, "sites.yml")
 
 
 # ---------------------------------------------------------------------------
-# Constants derived from network_standards/
+# Constants from network_standards/
 # ---------------------------------------------------------------------------
 
 REGIONS = {
@@ -33,11 +46,11 @@ REGIONS = {
 }
 
 LOCAL_SUPERNETS = {
-    "esx_vsan":       {"base": "10.204.0.0/16", "prefix_len": 24, "vlan": None},
-    "esx_vmkernel":   {"base": "10.200.0.0/16", "prefix_len": 24, "vlan": None},
-    "ptp":            {"base": "10.205.0.0/16", "prefix_len": 24, "vlan": 205},
-    "tickpublisher":  {"base": "10.10.0.0/16",  "prefix_len": 24, "vlan": 600},
-    "orderentry_nat": {"base": "10.112.0.0/16", "prefix_len": 26, "vlan": 700},
+    "esx_vsan":       {"base": "10.204.0.0/16", "prefix_len": 24},
+    "esx_vmkernel":   {"base": "10.200.0.0/16", "prefix_len": 24},
+    "ptp":            {"base": "10.205.0.0/16", "prefix_len": 24},
+    "tickpublisher":  {"base": "10.10.0.0/16",  "prefix_len": 24},
+    "orderentry_nat": {"base": "10.112.0.0/16", "prefix_len": 26},
 }
 
 HTCOLO_VLANS = [
@@ -47,483 +60,605 @@ HTCOLO_VLANS = [
     {"offset": 3, "vid": 130, "name": "ESX",    "prefix_len": 24},
 ]
 
-INTRA_SITE_OFFSET = 4
-
-WAN_P2P_BASE = ipaddress.IPv4Network("10.0.0.0/16")
-WAN_HUBS_PER_REGION = 3
-
-CORE_DEVICES = [
-    # (hostname_prefix, role, type, cabinet, side, offset)
-    ("MGTSW1A",      "MGT", "SW", 1, "A", 57),
-    ("MGTSW1B",      "MGT", "SW", 1, "B", 58),
-    ("INFSW1A",      "INF", "SW", 1, "A", 59),
-    ("INFSW1B",      "INF", "SW", 1, "B", 60),
-    ("TRDSW1A",      "TRD", "SW", 1, "A", 63),
-    ("TRDSW1B",      "TRD", "SW", 1, "B", 64),
-    ("TIMESERVER1A", "PTP", "SV", 1, "A", 30),
-    ("TIMESERVER1B", "PTP", "SV", 1, "B", 31),
-    ("PTPSW1A",      "PTP", "SW", 1, "A", 32),
-    ("PTPSW1B",      "PTP", "SW", 1, "B", 33),
-    ("CONSOLE1A",    "OOB", "SV", 1, "A", 34),
-    ("CONSOLE1B",    "OOB", "SV", 1, "B", 35),
+SITE_VLANS = [
+    (100, "INFRA"), (110, "MGMT"), (120, "APP"), (130, "ESX"),
+    (800, "FEED_A"), (801, "FEED_B"),
+    (3000, "MGTSW_IBGP"), (3050, "TRDSW_INTERLINK"), (3100, "INFRA_AB_INTERLINK"),
 ]
 
+INTRA_SITE_OFFSET = 4
+WAN_P2P_BASE = ipaddress.IPv4Network("10.0.0.0/16")
+WAN_HUBS_PER_REGION = 3
 ASN_BASE = 65000
 
+DEVICE_CATALOG = {
+    "MGTSW":      {"role": "Management",      "type": "Switch", "offsets": {1: 57, 2: 67, 3: 77, 4: 87}},
+    "INFSW":      {"role": "Infrastructure",   "type": "Switch", "offsets": {1: 59, 2: 69, 3: 79, 4: 89}},
+    "TRDSW":      {"role": "Trading",          "type": "Switch", "offsets": {1: 63, 2: 73, 3: 83, 4: 93}},
+    "TIMESERVER": {"role": "PTP",              "type": "Server",  "offsets": {1: 30}},
+    "PTPSW":      {"role": "PTP",              "type": "Switch", "offsets": {1: 32}},
+    "CONSOLE":    {"role": "OOB",              "type": "Server",  "offsets": {1: 34}},
+}
+
+SVI_OFFSETS = {"A": 3, "B": 2, "VRRP": 1}
+
 
 # ---------------------------------------------------------------------------
-# Address derivation — mirrors the formulas in network_standards/
+# Device name parsing
 # ---------------------------------------------------------------------------
 
-def get_region(site_id: int) -> tuple[str, dict]:
+def parse_device_name(name: str) -> dict:
+    """Parse a device name like MGTSW1A into components."""
+    for prefix, catalog in DEVICE_CATALOG.items():
+        if name.startswith(prefix):
+            remainder = name[len(prefix):]
+            cabinet = int(remainder[0])
+            side = remainder[1]
+            return {
+                "prefix": prefix,
+                "role": catalog["role"],
+                "type": catalog["type"],
+                "cabinet": cabinet,
+                "side": side,
+                "base_offset": catalog["offsets"].get(cabinet, catalog["offsets"][1]),
+                "side_offset": 0 if side == "A" else 1,
+            }
+    raise ValueError(f"Unknown device name: {name}")
+
+
+# ---------------------------------------------------------------------------
+# Address derivation
+# ---------------------------------------------------------------------------
+
+def get_region(site_id: int) -> tuple:
     for name, cfg in REGIONS.items():
-        end = cfg["start"] + 63
-        if cfg["start"] <= site_id <= end:
+        if cfg["start"] <= site_id <= cfg["start"] + 63:
             return name, cfg
-    raise ValueError(f"site_id {site_id} is outside all region ranges (0-63, 64-127, 128-191)")
+    raise ValueError(f"site_id {site_id} outside valid ranges (0-63, 64-127, 128-191)")
 
 
-def derive_addressing(site_id: int, region_cfg: dict) -> dict:
+def derive_site_addressing(site_id: int, region_cfg: dict) -> dict:
     pair_index = (site_id - region_cfg["start"]) // 2
 
     htcolo_net = ipaddress.IPv4Network(region_cfg["htcolo"])
-    htcolo_base_int = int(htcolo_net.network_address) + (pair_index * 8 * 256)
-    htcolo_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(htcolo_base_int)}/21")
+    htcolo_base = int(htcolo_net.network_address) + (pair_index * 8 * 256)
+    htcolo_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(htcolo_base)}/21")
 
     netinfra_net = ipaddress.IPv4Network(region_cfg["netinfra"])
-    netinfra_base_int = int(netinfra_net.network_address) + (pair_index * 256)
-    netinfra_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(netinfra_base_int)}/24")
+    netinfra_base = int(netinfra_net.network_address) + (pair_index * 256)
+    netinfra_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(netinfra_base)}/24")
 
-    htcolo_vlans = []
+    vlan_prefixes = []
     for v in HTCOLO_VLANS:
-        vlan_base_int = htcolo_base_int + (v["offset"] * 256)
-        vlan_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(vlan_base_int)}/{v['prefix_len']}")
-        htcolo_vlans.append({**v, "prefix": vlan_prefix})
+        vlan_base = htcolo_base + (v["offset"] * 256)
+        vlan_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(vlan_base)}/{v['prefix_len']}")
+        vlan_prefixes.append({**v, "prefix": vlan_prefix})
 
-    intra_base_int = htcolo_base_int + (INTRA_SITE_OFFSET * 256)
-    intra_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(intra_base_int)}/24")
-    ibgp_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(intra_base_int)}/30")
-    sw1a_ibgp = ipaddress.IPv4Address(intra_base_int + 1)
-    sw1b_ibgp = ipaddress.IPv4Address(intra_base_int + 2)
+    intra_base = htcolo_base + (INTRA_SITE_OFFSET * 256)
+    intra_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(intra_base)}/24")
+    ibgp_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(intra_base)}/30")
 
     local_prefixes = {}
     for name, cfg in LOCAL_SUPERNETS.items():
         base_net = ipaddress.IPv4Network(cfg["base"])
-        local_base_int = int(base_net.network_address) + (site_id * 256)
-        local_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(local_base_int)}/{cfg['prefix_len']}")
-        local_prefixes[name] = {"prefix": local_prefix, "vlan": cfg["vlan"]}
+        local_base = int(base_net.network_address) + (site_id * 256)
+        local_prefixes[name] = ipaddress.IPv4Network(
+            f"{ipaddress.IPv4Address(local_base)}/{cfg['prefix_len']}"
+        )
 
     return {
         "pair_index": pair_index,
         "asn": ASN_BASE + site_id,
         "htcolo_prefix": htcolo_prefix,
         "netinfra_prefix": netinfra_prefix,
-        "htcolo_vlans": htcolo_vlans,
+        "vlan_prefixes": vlan_prefixes,
         "intra_prefix": intra_prefix,
         "ibgp_prefix": ibgp_prefix,
-        "sw1a_ibgp": sw1a_ibgp,
-        "sw1b_ibgp": sw1b_ibgp,
+        "ibgp_a": ipaddress.IPv4Address(intra_base + 1),
+        "ibgp_b": ipaddress.IPv4Address(intra_base + 2),
         "local_prefixes": local_prefixes,
     }
 
 
-def derive_wan_p2p(site_id: int, region_cfg: dict) -> list[dict]:
+def derive_device_ips(device_name: str, vlan_prefixes: list) -> dict:
+    """Derive SVI IPs for a device on each VLAN and management IP."""
+    dev = parse_device_name(device_name)
+    offset = dev["base_offset"] + dev["side_offset"]
+    ips = {}
+
+    for vp in vlan_prefixes:
+        broadcast = int(vp["prefix"].broadcast_address)
+        mgmt_ip = ipaddress.IPv4Address(broadcast - offset)
+        svi_ip = ipaddress.IPv4Address(broadcast - SVI_OFFSETS[dev["side"]])
+        vrrp_ip = ipaddress.IPv4Address(broadcast - SVI_OFFSETS["VRRP"])
+        ips[vp["vid"]] = {
+            "mgmt_ip": mgmt_ip,
+            "svi_ip": svi_ip,
+            "vrrp_ip": vrrp_ip,
+            "prefix": vp["prefix"],
+        }
+
+    return ips
+
+
+def derive_wan_p2p(site_id: int, region_cfg: dict) -> list:
     pair_index = (site_id - region_cfg["start"]) // 2
     region_offset = region_cfg["start"]
     links = []
-
     for hub_index in range(WAN_HUBS_PER_REGION):
         for side, side_offset in [("A", 0), ("B", 32)]:
             third_octet = region_offset + side_offset + hub_index
             fourth_octet = pair_index * 4
-            base_int = int(WAN_P2P_BASE.network_address) + (third_octet * 256) + fourth_octet
-            p2p_prefix = ipaddress.IPv4Network(f"{ipaddress.IPv4Address(base_int)}/30")
-            hub_ip = ipaddress.IPv4Address(base_int + 1)
-            colo_ip = ipaddress.IPv4Address(base_int + 2)
+            base = int(WAN_P2P_BASE.network_address) + (third_octet * 256) + fourth_octet
             links.append({
-                "hub_index": hub_index,
-                "side": side,
-                "prefix": p2p_prefix,
-                "hub_ip": hub_ip,
-                "colo_ip": colo_ip,
+                "hub_index": hub_index, "side": side,
+                "prefix": ipaddress.IPv4Network(f"{ipaddress.IPv4Address(base)}/30"),
+                "hub_ip": ipaddress.IPv4Address(base + 1),
+                "colo_ip": ipaddress.IPv4Address(base + 2),
             })
-
     return links
 
 
-def compute_device_ips(addressing: dict) -> dict:
-    """Compute management IPs for each core device on the INFRA /24."""
-    infra_prefix = addressing["htcolo_vlans"][0]["prefix"]  # offset +0 = INFRA
-    broadcast_int = int(infra_prefix.broadcast_address)
-    device_ips = {}
-    for dev in CORE_DEVICES:
-        hostname_prefix, _, _, _, _, offset = dev
-        ip = ipaddress.IPv4Address(broadcast_int - offset)
-        device_ips[hostname_prefix] = ip
-    return device_ips
-
-
 # ---------------------------------------------------------------------------
-# NetBox provisioning
+# NetBox API helpers (raw requests for branching support)
 # ---------------------------------------------------------------------------
 
-def get_or_create_rir(nb):
-    rir = nb.ipam.rirs.get(slug="rfc1918")
-    if not rir:
-        rir = nb.ipam.rirs.create(name="RFC1918", slug="rfc1918", is_private=True)
-        print(f"  Created RIR: {rir}")
-    return rir
+class NetBoxClient:
+    def __init__(self, url: str, token: str, branch_schema_id: str = None):
+        self.url = url.rstrip("/")
+        self.token = token
+        self.branch_schema_id = branch_schema_id
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Token {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        })
 
+    def _headers(self):
+        h = {}
+        if self.branch_schema_id:
+            h["X-NetBox-Branch"] = self.branch_schema_id
+        return h
 
-def get_or_create_role(nb, name, slug):
-    role = nb.dcim.device_roles.get(slug=slug)
-    if not role:
-        role = nb.dcim.device_roles.create(name=name, slug=slug, color="607d8b")
-        print(f"  Created device role: {role}")
-    return role
+    def get(self, endpoint, params=None):
+        r = self.session.get(f"{self.url}/api/{endpoint}", params=params, headers=self._headers())
+        r.raise_for_status()
+        return r.json()
 
+    def post(self, endpoint, data):
+        r = self.session.post(f"{self.url}/api/{endpoint}", json=data, headers=self._headers())
+        r.raise_for_status()
+        return r.json()
 
-def get_or_create_device_type(nb, model, slug):
-    dt = nb.dcim.device_types.get(slug=slug)
-    if not dt:
-        manufacturer = nb.dcim.manufacturers.get(slug="generic")
-        if not manufacturer:
-            manufacturer = nb.dcim.manufacturers.create(name="Generic", slug="generic")
-        dt = nb.dcim.device_types.create(
-            manufacturer=manufacturer.id,
-            model=model,
-            slug=slug,
+    def delete(self, endpoint):
+        r = self.session.delete(f"{self.url}/api/{endpoint}", headers=self._headers())
+        r.raise_for_status()
+
+    def get_or_none(self, endpoint, **filters):
+        result = self.get(endpoint, params=filters)
+        results = result.get("results", [])
+        return results[0] if results else None
+
+    # --- Branch operations (no X-NetBox-Branch header) ---
+
+    def create_branch(self, name: str, description: str = "") -> dict:
+        r = self.session.post(
+            f"{self.url}/api/plugins/branching/branches/",
+            json={"name": name, "description": description},
         )
-        print(f"  Created device type: {dt}")
-    return dt
+        r.raise_for_status()
+        return r.json()
+
+    def get_branch(self, branch_id: int) -> dict:
+        r = self.session.get(f"{self.url}/api/plugins/branching/branches/{branch_id}/")
+        r.raise_for_status()
+        return r.json()
+
+    def merge_branch(self, branch_id: int) -> dict:
+        r = self.session.post(
+            f"{self.url}/api/plugins/branching/branches/{branch_id}/merge/",
+            json={"commit": True},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def wait_for_branch_ready(self, branch_id: int, timeout: int = 30):
+        for _ in range(timeout):
+            branch = self.get_branch(branch_id)
+            if branch["status"]["value"] == "ready":
+                return branch
+            time.sleep(1)
+        raise TimeoutError(f"Branch {branch_id} not ready after {timeout}s")
 
 
-def get_or_create_prefix_role(nb, name, slug):
-    role = nb.ipam.roles.get(slug=slug)
-    if not role:
-        role = nb.ipam.roles.create(name=name, slug=slug)
-        print(f"  Created prefix role: {role}")
-    return role
+# ---------------------------------------------------------------------------
+# Provisioning logic
+# ---------------------------------------------------------------------------
+
+def ensure_region(nb, region_name):
+    slug = region_name.lower()
+    existing = nb.get_or_none("dcim/regions/", slug=slug)
+    if existing:
+        return existing
+    result = nb.post("dcim/regions/", {"name": region_name, "slug": slug})
+    print(f"  + Region: {region_name}")
+    return result
 
 
-def provision(nb, site_code: str, site_id: int, dry_run: bool = False):
+def ensure_site(nb, site_code, region_id):
+    slug = site_code.lower()
+    existing = nb.get_or_none("dcim/sites/", slug=slug)
+    if existing:
+        return existing
+    result = nb.post("dcim/sites/", {
+        "name": site_code, "slug": slug, "region": region_id, "status": "planned",
+    })
+    print(f"  + Site: {site_code}")
+    return result
+
+
+def ensure_rir(nb):
+    existing = nb.get_or_none("ipam/rirs/", slug="rfc1918")
+    if existing:
+        return existing
+    return nb.post("ipam/rirs/", {"name": "RFC1918", "slug": "rfc1918", "is_private": True})
+
+
+def ensure_asn(nb, asn, rir_id, site_id):
+    existing = nb.get_or_none("ipam/asns/", asn=asn)
+    if existing:
+        return existing
+    result = nb.post("ipam/asns/", {"asn": asn, "rir": rir_id})
+    print(f"  + ASN: {asn}")
+    return result
+
+
+def ensure_vlan_group(nb, site_code, site_id):
+    slug = f"{site_code.lower()}-vlans"
+    existing = nb.get_or_none("ipam/vlan-groups/", slug=slug)
+    if existing:
+        return existing
+    result = nb.post("ipam/vlan-groups/", {
+        "name": f"{site_code} VLANs", "slug": slug,
+        "scope_type": "dcim.site", "scope_id": site_id,
+    })
+    print(f"  + VLAN Group: {site_code} VLANs")
+    return result
+
+
+def ensure_vlan(nb, vlan_group_id, vid, name):
+    existing = nb.get_or_none("ipam/vlans/", group_id=vlan_group_id, vid=vid)
+    if existing:
+        return existing
+    result = nb.post("ipam/vlans/", {
+        "group": vlan_group_id, "vid": vid, "name": name, "status": "active",
+    })
+    print(f"  + VLAN: {vid} {name}")
+    return result
+
+
+def ensure_prefix_role(nb, name, slug):
+    existing = nb.get_or_none("ipam/roles/", slug=slug)
+    if existing:
+        return existing
+    return nb.post("ipam/roles/", {"name": name, "slug": slug})
+
+
+def ensure_prefix(nb, prefix_str, site_id, role_id, description, vlan_id=None):
+    existing = nb.get_or_none("ipam/prefixes/", prefix=prefix_str, site_id=site_id)
+    if existing:
+        return existing
+    data = {
+        "prefix": prefix_str, "site": site_id, "role": role_id,
+        "status": "active", "description": description,
+    }
+    if vlan_id:
+        data["vlan"] = vlan_id
+    result = nb.post("ipam/prefixes/", data)
+    print(f"  + Prefix: {prefix_str:20s} {description}")
+    return result
+
+
+def ensure_ip(nb, address, description):
+    existing = nb.get_or_none("ipam/ip-addresses/", address=address)
+    if existing:
+        return existing
+    result = nb.post("ipam/ip-addresses/", {
+        "address": address, "status": "active", "description": description,
+    })
+    print(f"  + IP: {address:20s} {description}")
+    return result
+
+
+def ensure_device_role(nb, name, slug):
+    existing = nb.get_or_none("dcim/device-roles/", slug=slug)
+    if existing:
+        return existing
+    return nb.post("dcim/device-roles/", {"name": name, "slug": slug, "color": "607d8b"})
+
+
+def ensure_device_type(nb, model, slug):
+    existing = nb.get_or_none("dcim/device-types/", slug=slug)
+    if existing:
+        return existing
+    manufacturer = nb.get_or_none("dcim/manufacturers/", slug="generic")
+    if not manufacturer:
+        manufacturer = nb.post("dcim/manufacturers/", {"name": "Generic", "slug": "generic"})
+    return nb.post("dcim/device-types/", {
+        "manufacturer": manufacturer["id"], "model": model, "slug": slug,
+    })
+
+
+def ensure_device(nb, hostname, role_id, type_id, site_id):
+    existing = nb.get_or_none("dcim/devices/", name=hostname)
+    if existing:
+        return existing, False
+    result = nb.post("dcim/devices/", {
+        "name": hostname, "role": role_id, "device_type": type_id,
+        "site": site_id, "status": "planned",
+    })
+    print(f"  + Device: {hostname}")
+    return result, True
+
+
+def provision_site(nb, site_code: str, site_id: int, device_names: list):
     region_name, region_cfg = get_region(site_id)
-    addr = derive_addressing(site_id, region_cfg)
+    addr = derive_site_addressing(site_id, region_cfg)
     wan_links = derive_wan_p2p(site_id, region_cfg)
-    device_ips = compute_device_ips(addr)
 
-    print(f"\n{'[DRY RUN] ' if dry_run else ''}Provisioning site: {site_code}")
-    print(f"  Region:      {region_name}")
-    print(f"  site_id:     {site_id}")
-    print(f"  ASN:         {addr['asn']}")
-    print(f"  htcolo /21:  {addr['htcolo_prefix']}")
-    print(f"  netinfra:    {addr['netinfra_prefix']}")
-    print(f"  iBGP SW1A:   {addr['sw1a_ibgp']}")
-    print(f"  iBGP SW1B:   {addr['sw1b_ibgp']}")
-    print()
+    print(f"\n--- {site_code} (site_id={site_id}, {region_name}, ASN {addr['asn']}) ---")
 
-    for name, lp in addr["local_prefixes"].items():
-        print(f"  {name:20s} {lp['prefix']}")
-    print()
+    nb_region = ensure_region(nb, region_name)
+    nb_site = ensure_site(nb, site_code, nb_region["id"])
+    rir = ensure_rir(nb)
+    ensure_asn(nb, addr["asn"], rir["id"], nb_site["id"])
 
-    print(f"  WAN P2P links ({len(wan_links)}):")
-    for link in wan_links:
-        print(f"    Hub{link['hub_index']}-{link['side']}: {link['prefix']}  hub={link['hub_ip']}  colo={link['colo_ip']}")
-    print()
+    vlan_group = ensure_vlan_group(nb, site_code, nb_site["id"])
+    vlan_map = {}
+    for vid, name in SITE_VLANS:
+        vlan_map[vid] = ensure_vlan(nb, vlan_group["id"], vid, name)
 
-    print(f"  Core devices ({len(CORE_DEVICES)}):")
-    for dev in CORE_DEVICES:
-        hostname = f"{dev[0]}-{site_code}"
-        ip = device_ips[dev[0]]
-        print(f"    {hostname:25s} {ip}")
-    print()
+    role_htcolo = ensure_prefix_role(nb, "htcolo", "htcolo")
+    role_netinfra = ensure_prefix_role(nb, "netinfra", "netinfra")
+    role_local = ensure_prefix_role(nb, "local", "local")
+    role_p2p = ensure_prefix_role(nb, "wan-p2p", "wan-p2p")
+    role_intra = ensure_prefix_role(nb, "intra-site", "intra-site")
 
-    if dry_run:
-        print("[DRY RUN] No changes made to NetBox.")
-        return
+    ensure_prefix(nb, str(addr["htcolo_prefix"]), nb_site["id"], role_htcolo["id"],
+                  f"{site_code} htcolo")
 
-    # --- Create region if needed ---
-    nb_region = nb.dcim.regions.get(slug=region_name.lower())
-    if not nb_region:
-        nb_region = nb.dcim.regions.create(name=region_name, slug=region_name.lower())
-        print(f"  Created region: {nb_region}")
+    for vp in addr["vlan_prefixes"]:
+        ensure_prefix(nb, str(vp["prefix"]), nb_site["id"], role_htcolo["id"],
+                      f"{site_code} {vp['name']}", vlan_id=vlan_map[vp["vid"]]["id"])
 
-    # --- Create site ---
-    site_slug = site_code.lower()
-    nb_site = nb.dcim.sites.get(slug=site_slug)
-    if nb_site:
-        print(f"  Site already exists: {nb_site}")
-    else:
-        nb_site = nb.dcim.sites.create(
-            name=site_code,
-            slug=site_slug,
-            region=nb_region.id,
-            status="planned",
-            custom_fields={"site_id": site_id} if _has_custom_field(nb, "site_id") else {},
-        )
-        print(f"  Created site: {nb_site}")
+    ensure_prefix(nb, str(addr["intra_prefix"]), nb_site["id"], role_intra["id"],
+                  f"{site_code} INTRA-SITE")
+    ensure_prefix(nb, str(addr["ibgp_prefix"]), nb_site["id"], role_intra["id"],
+                  f"{site_code} iBGP MGTSW1A-MGTSW1B")
+    ensure_ip(nb, f"{addr['ibgp_a']}/30", f"MGTSW1A-{site_code} iBGP")
+    ensure_ip(nb, f"{addr['ibgp_b']}/30", f"MGTSW1B-{site_code} iBGP")
 
-    # --- Create ASN ---
-    rir = get_or_create_rir(nb)
-    existing_asn = nb.ipam.asns.get(asn=addr["asn"])
-    if existing_asn:
-        print(f"  ASN already exists: {existing_asn}")
-    else:
-        nb_asn = nb.ipam.asns.create(asn=addr["asn"], rir=rir.id)
-        nb_asn.sites = [nb_site.id]
-        nb_asn.save()
-        print(f"  Created ASN: {nb_asn}")
+    ensure_prefix(nb, str(addr["netinfra_prefix"]), nb_site["id"], role_netinfra["id"],
+                  f"{site_code} netinfra")
 
-    # --- VLAN group ---
-    vg_slug = f"{site_slug}-vlans"
-    vlan_group = nb.ipam.vlan_groups.get(slug=vg_slug)
-    if not vlan_group:
-        vlan_group = nb.ipam.vlan_groups.create(
-            name=f"{site_code} VLANs",
-            slug=vg_slug,
-            scope_type="dcim.site",
-            scope_id=nb_site.id,
-        )
-        print(f"  Created VLAN group: {vlan_group}")
+    for name, prefix in addr["local_prefixes"].items():
+        ensure_prefix(nb, str(prefix), nb_site["id"], role_local["id"],
+                      f"{site_code} {name}")
 
-    # --- Prefix roles ---
-    role_htcolo = get_or_create_prefix_role(nb, "htcolo", "htcolo")
-    role_netinfra = get_or_create_prefix_role(nb, "netinfra", "netinfra")
-    role_local = get_or_create_prefix_role(nb, "local", "local")
-    role_p2p = get_or_create_prefix_role(nb, "wan-p2p", "wan-p2p")
-    role_intra = get_or_create_prefix_role(nb, "intra-site", "intra-site")
-
-    # --- htcolo /21 parent ---
-    _create_prefix(nb, str(addr["htcolo_prefix"]), nb_site, role_htcolo,
-                   f"{site_code} htcolo")
-
-    # --- htcolo VLAN /24s ---
-    for v in addr["htcolo_vlans"]:
-        nb_vlan = _get_or_create_vlan(nb, vlan_group, v["vid"], v["name"])
-        _create_prefix(nb, str(v["prefix"]), nb_site, role_htcolo,
-                       f"{site_code} {v['name']}", vlan=nb_vlan)
-
-    # --- Intra-site /24 ---
-    _create_prefix(nb, str(addr["intra_prefix"]), nb_site, role_intra,
-                   f"{site_code} INTRA-SITE")
-
-    # --- iBGP /30 and IPs ---
-    _create_prefix(nb, str(addr["ibgp_prefix"]), nb_site, role_intra,
-                   f"{site_code} iBGP SW1A-SW1B")
-    _create_ip(nb, f"{addr['sw1a_ibgp']}/30", f"MGTSW1A-{site_code} iBGP")
-    _create_ip(nb, f"{addr['sw1b_ibgp']}/30", f"MGTSW1B-{site_code} iBGP")
-
-    # --- netinfra /24 ---
-    _create_prefix(nb, str(addr["netinfra_prefix"]), nb_site, role_netinfra,
-                   f"{site_code} netinfra")
-
-    # --- Local supernets ---
-    for name, lp in addr["local_prefixes"].items():
-        nb_vlan = None
-        if lp["vlan"]:
-            nb_vlan = _get_or_create_vlan(nb, vlan_group, lp["vlan"], name.upper())
-        _create_prefix(nb, str(lp["prefix"]), nb_site, role_local,
-                       f"{site_code} {name}", vlan=nb_vlan)
-
-    # --- WAN P2P /30s ---
     for link in wan_links:
         desc = f"{site_code} Hub{link['hub_index']}-{link['side']}"
-        _create_prefix(nb, str(link["prefix"]), nb_site, role_p2p, desc)
-        _create_ip(nb, f"{link['hub_ip']}/30", f"Hub{link['hub_index']}-{link['side']} → {site_code}")
-        _create_ip(nb, f"{link['colo_ip']}/30", f"{site_code} → Hub{link['hub_index']}-{link['side']}")
+        ensure_prefix(nb, str(link["prefix"]), nb_site["id"], role_p2p["id"], desc)
+        ensure_ip(nb, f"{link['hub_ip']}/30", f"Hub{link['hub_index']}-{link['side']} -> {site_code}")
+        ensure_ip(nb, f"{link['colo_ip']}/30", f"{site_code} -> Hub{link['hub_index']}-{link['side']}")
 
-    # --- VLANs without htcolo prefixes (trading switch VLANs) ---
-    for vid, name in [(800, "FEED_A"), (801, "FEED_B"), (3000, "MGTSW_IBGP"), (3050, "TRDSW_INTERLINK"), (3100, "INFRA_AB_INTERLINK")]:
-        _get_or_create_vlan(nb, vlan_group, vid, name)
+    roles_cache = {}
+    types_cache = {}
 
-    # --- Device roles ---
-    roles = {
-        "MGT": get_or_create_role(nb, "Management", "management"),
-        "TRD": get_or_create_role(nb, "Trading", "trading"),
-        "INF": get_or_create_role(nb, "Infrastructure", "infrastructure"),
-        "PTP": get_or_create_role(nb, "PTP", "ptp"),
-        "OOB": get_or_create_role(nb, "OOB", "oob"),
-    }
+    for device_name in device_names:
+        dev = parse_device_name(device_name)
+        hostname = f"{device_name}-{site_code}"
 
-    # --- Device types ---
-    types = {
-        "SW": get_or_create_device_type(nb, "Switch", "switch"),
-        "SV": get_or_create_device_type(nb, "Server", "server"),
-    }
+        role_slug = dev["role"].lower()
+        if role_slug not in roles_cache:
+            roles_cache[role_slug] = ensure_device_role(nb, dev["role"], role_slug)
 
-    # --- Core devices ---
-    for dev in CORE_DEVICES:
-        hostname_prefix, role_code, type_code, cab, side, offset = dev
-        hostname = f"{hostname_prefix}-{site_code}"
-        nb_dev = nb.dcim.devices.get(name=hostname)
-        if nb_dev:
-            print(f"  Device already exists: {nb_dev}")
-            continue
+        type_slug = dev["type"].lower()
+        if type_slug not in types_cache:
+            types_cache[type_slug] = ensure_device_type(nb, dev["type"], type_slug)
 
-        nb_dev = nb.dcim.devices.create(
-            name=hostname,
-            device_role=roles[role_code].id,
-            device_type=types[type_code].id,
-            site=nb_site.id,
-            status="planned",
-        )
-        print(f"  Created device: {nb_dev}")
-
-        mgmt_iface = nb.dcim.interfaces.create(
-            device=nb_dev.id,
-            name="Management1",
-            type="1000base-t",
+        nb_dev, created = ensure_device(
+            nb, hostname, roles_cache[role_slug]["id"],
+            types_cache[type_slug]["id"], nb_site["id"],
         )
 
-        mgmt_ip = device_ips[hostname_prefix]
-        nb_ip = _create_ip(nb, f"{mgmt_ip}/24", hostname,
-                           interface_id=mgmt_iface.id, device_id=nb_dev.id)
-        if nb_ip:
-            nb_dev.primary_ip4 = nb_ip.id
-            nb_dev.save()
-
-    print(f"\nSite {site_code} provisioned successfully.")
-
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
-def _has_custom_field(nb, field_name):
-    try:
-        cfs = nb.extras.custom_fields.filter(name=field_name)
-        return len(list(cfs)) > 0
-    except Exception:
-        return False
+        if created:
+            mgmt_iface = nb.post("dcim/interfaces/", {
+                "device": nb_dev["id"], "name": "Management1", "type": "1000base-t",
+            })
+            device_ips = derive_device_ips(device_name, addr["vlan_prefixes"])
+            mgmt_vlan = device_ips.get(110)
+            if mgmt_vlan:
+                mgmt_ip = ensure_ip(nb, f"{mgmt_vlan['svi_ip']}/24", f"{hostname} MGMT SVI")
 
 
-def _create_prefix(nb, prefix_str, site, role, description, vlan=None):
-    existing = nb.ipam.prefixes.get(prefix=prefix_str, site_id=site.id)
-    if existing:
-        print(f"  Prefix exists: {prefix_str}")
-        return existing
+def decommission_site(nb, site_code: str):
+    """Remove a site and all its associated objects from NetBox."""
+    print(f"\n--- Removing: {site_code} ---")
+    nb_site = nb.get_or_none("dcim/sites/", slug=site_code.lower())
+    if not nb_site:
+        print(f"  Site {site_code} not found in NetBox, skipping")
+        return
 
-    data = {
-        "prefix": prefix_str,
-        "site": site.id,
-        "role": role.id,
-        "status": "active",
-        "description": description,
-    }
-    if vlan:
-        data["vlan"] = vlan.id
+    site_nb_id = nb_site["id"]
 
-    prefix = nb.ipam.prefixes.create(**data)
-    print(f"  Created prefix: {prefix_str:20s}  {description}")
-    return prefix
+    devices = nb.get("dcim/devices/", params={"site_id": site_nb_id, "limit": 200})
+    for dev in devices.get("results", []):
+        ips = nb.get("ipam/ip-addresses/", params={"device_id": dev["id"], "limit": 200})
+        for ip in ips.get("results", []):
+            nb.delete(f"ipam/ip-addresses/{ip['id']}/")
+            print(f"  - IP: {ip['address']} ({ip.get('description', '')})")
 
+        ifaces = nb.get("dcim/interfaces/", params={"device_id": dev["id"], "limit": 200})
+        for iface in ifaces.get("results", []):
+            nb.delete(f"dcim/interfaces/{iface['id']}/")
 
-def _create_ip(nb, address_str, description, interface_id=None, device_id=None):
-    existing = list(nb.ipam.ip_addresses.filter(address=address_str))
-    if existing:
-        print(f"  IP exists: {address_str}")
-        return existing[0]
+        nb.delete(f"dcim/devices/{dev['id']}/")
+        print(f"  - Device: {dev['name']}")
 
-    data = {
-        "address": address_str,
-        "status": "active",
-        "description": description,
-    }
-    if interface_id:
-        data["assigned_object_type"] = "dcim.interface"
-        data["assigned_object_id"] = interface_id
+    prefixes = nb.get("ipam/prefixes/", params={"site_id": site_nb_id, "limit": 500})
+    for pfx in prefixes.get("results", []):
+        nb.delete(f"ipam/prefixes/{pfx['id']}/")
+        print(f"  - Prefix: {pfx['prefix']}")
 
-    ip = nb.ipam.ip_addresses.create(**data)
-    print(f"  Created IP: {address_str:20s}  {description}")
-    return ip
+    vlan_groups = nb.get("ipam/vlan-groups/", params={"slug": f"{site_code.lower()}-vlans"})
+    for vg in vlan_groups.get("results", []):
+        vlans = nb.get("ipam/vlans/", params={"group_id": vg["id"], "limit": 200})
+        for vlan in vlans.get("results", []):
+            nb.delete(f"ipam/vlans/{vlan['id']}/")
+            print(f"  - VLAN: {vlan['vid']} {vlan['name']}")
+        nb.delete(f"ipam/vlan-groups/{vg['id']}/")
+
+    nb.delete(f"dcim/sites/{site_nb_id}/")
+    print(f"  - Site: {site_code}")
 
 
-def _get_or_create_vlan(nb, vlan_group, vid, name):
-    existing = nb.ipam.vlans.get(group_id=vlan_group.id, vid=vid)
-    if existing:
-        return existing
-    vlan = nb.ipam.vlans.create(
-        group=vlan_group.id,
-        vid=vid,
-        name=name,
-        status="active",
-    )
-    print(f"  Created VLAN: {vid} {name}")
-    return vlan
+def reconcile(nb, desired_sites: dict, dry_run: bool = False):
+    """Reconcile NetBox state with desired sites.yml."""
+    if dry_run:
+        print("\n[DRY RUN] Showing what would be provisioned:\n")
+        for site_code, cfg in desired_sites.items():
+            site_id = cfg["site_id"]
+            devices = cfg.get("devices", [])
+            region_name, region_cfg = get_region(site_id)
+            addr = derive_site_addressing(site_id, region_cfg)
+            wan_links = derive_wan_p2p(site_id, region_cfg)
+
+            print(f"--- {site_code} (site_id={site_id}, {region_name}, ASN {addr['asn']}) ---")
+            print(f"  htcolo /21:  {addr['htcolo_prefix']}")
+            print(f"  netinfra:    {addr['netinfra_prefix']}")
+            print(f"  iBGP:        {addr['ibgp_a']} <-> {addr['ibgp_b']}")
+            for name, prefix in addr["local_prefixes"].items():
+                print(f"  {name:20s} {prefix}")
+            print(f"  WAN P2P:     {len(wan_links)} links")
+            print(f"  Devices:     {', '.join(devices)}")
+            print()
+        return
+
+    # Find sites in NetBox that are not in desired state
+    all_nb_sites = nb.get("dcim/sites/", params={"limit": 200})
+    nb_site_slugs = {s["slug"]: s for s in all_nb_sites.get("results", [])}
+    desired_slugs = {code.lower() for code in desired_sites}
+
+    for slug, nb_site in nb_site_slugs.items():
+        if slug not in desired_slugs:
+            print(f"\n  Site '{nb_site['name']}' exists in NetBox but not in sites.yml")
+            print(f"  To remove it, this will be handled in the branch for review")
+            decommission_site(nb, nb_site["name"])
+
+    # Provision desired sites
+    for site_code, cfg in desired_sites.items():
+        provision_site(nb, site_code, cfg["site_id"], cfg.get("devices", []))
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def validate_site_id(site_id: int):
-    if site_id < 0 or site_id > 191:
-        raise ValueError(f"site_id must be 0-191, got {site_id}")
-    if site_id % 2 != 0:
-        raise ValueError(f"site_id must be even (odd IDs are reserved), got {site_id}")
+def load_sites(path: str) -> dict:
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    sites = data.get("sites", {})
+
+    for code, cfg in sites.items():
+        sid = cfg.get("site_id")
+        if sid is None:
+            raise ValueError(f"Site {code} missing site_id")
+        if sid < 0 or sid > 190:
+            raise ValueError(f"Site {code}: site_id must be 0-190, got {sid}")
+        if sid % 2 != 0:
+            raise ValueError(f"Site {code}: site_id must be even, got {sid}")
+        if len(code) != 6 and len(code) != 5:
+            print(f"  Warning: site code '{code}' is not 5-6 characters", file=sys.stderr)
+
+    return sites
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Provision a new site in NetBox with all derived addressing."
+        description="Reconcile NetBox state with sites.yml desired state."
     )
-    parser.add_argument("--site", required=True, help="Site code, e.g. EQ4LON")
-    parser.add_argument("--site-id", type=int, required=True, help="Even site_id (0-190)")
     parser.add_argument("--url", default=os.environ.get("NETBOX_URL", "http://192.168.0.36"),
-                        help="NetBox URL (default: $NETBOX_URL or http://192.168.0.36)")
+                        help="NetBox URL")
     parser.add_argument("--token", default=os.environ.get("NETBOX_TOKEN"),
-                        help="NetBox API token (default: $NETBOX_TOKEN)")
+                        help="NetBox API token")
+    parser.add_argument("--sites-file", default=SITES_FILE,
+                        help="Path to sites.yml")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be created without making changes")
+    parser.add_argument("--branch", default=None,
+                        help="NetBox branch name (default: auto-generated)")
+    parser.add_argument("--merge", type=int, default=None, metavar="BRANCH_ID",
+                        help="Merge an existing branch by ID")
     args = parser.parse_args()
 
-    try:
-        validate_site_id(args.site_id)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    if args.merge:
+        if not args.token:
+            print("Error: --token required", file=sys.stderr)
+            sys.exit(1)
+        nb = NetBoxClient(args.url, args.token)
+        print(f"Merging branch {args.merge}...")
+        result = nb.merge_branch(args.merge)
+        print(f"Merge job submitted: {result.get('id', 'unknown')}")
+        return
 
-    if len(args.site) != 6:
-        print(f"Warning: site code '{args.site}' is not 6 characters (expected format: EQ4LON)", file=sys.stderr)
+    sites = load_sites(args.sites_file)
 
     if args.dry_run:
-        nb = None
-        region_name, region_cfg = get_region(args.site_id)
-        addr = derive_addressing(args.site_id, region_cfg)
-        wan_links = derive_wan_p2p(args.site_id, region_cfg)
-        device_ips = compute_device_ips(addr)
-
-        print(f"\n[DRY RUN] Provisioning site: {args.site}")
-        print(f"  Region:      {region_name}")
-        print(f"  site_id:     {args.site_id}")
-        print(f"  ASN:         {addr['asn']}")
-        print(f"  htcolo /21:  {addr['htcolo_prefix']}")
-        print(f"  netinfra:    {addr['netinfra_prefix']}")
-        print(f"  iBGP SW1A:   {addr['sw1a_ibgp']}")
-        print(f"  iBGP SW1B:   {addr['sw1b_ibgp']}")
-        print()
-        for name, lp in addr["local_prefixes"].items():
-            print(f"  {name:20s} {lp['prefix']}")
-        print()
-        print(f"  WAN P2P links ({len(wan_links)}):")
-        for link in wan_links:
-            print(f"    Hub{link['hub_index']}-{link['side']}: {link['prefix']}  hub={link['hub_ip']}  colo={link['colo_ip']}")
-        print()
-        print(f"  Core devices ({len(CORE_DEVICES)}):")
-        for dev in CORE_DEVICES:
-            hostname = f"{dev[0]}-{args.site}"
-            ip = device_ips[dev[0]]
-            print(f"    {hostname:25s} {ip}")
-        print()
-        print("[DRY RUN] No changes made to NetBox.")
+        reconcile(None, sites, dry_run=True)
         return
 
     if not args.token:
-        print("Error: --token or NETBOX_TOKEN environment variable required", file=sys.stderr)
+        print("Error: --token or NETBOX_TOKEN required", file=sys.stderr)
         sys.exit(1)
 
-    nb = pynetbox.api(args.url, token=args.token)
-    provision(nb, args.site, args.site_id)
+    nb = NetBoxClient(args.url, args.token)
+
+    branch_name = args.branch or f"provision-{time.strftime('%Y%m%d-%H%M%S')}"
+    print(f"Creating NetBox branch: {branch_name}")
+
+    try:
+        branch = nb.create_branch(branch_name, description=f"Automated provisioning from sites.yml")
+        branch_id = branch["id"]
+        schema_id = branch["schema_id"]
+        print(f"  Branch ID: {branch_id}, schema: {schema_id}")
+        print(f"  Waiting for branch to be ready...")
+        nb.wait_for_branch_ready(branch_id)
+        print(f"  Branch ready.")
+
+        nb.branch_schema_id = schema_id
+    except requests.exceptions.HTTPError as e:
+        if "branching" in str(e).lower() or e.response.status_code == 404:
+            print(f"  Warning: NetBox branching plugin not available, operating on main")
+            print(f"  Install netbox-branching for branch-based workflow")
+            branch_id = None
+        else:
+            raise
+
+    reconcile(nb, sites)
+
+    if branch_id:
+        print(f"\n{'='*60}")
+        print(f"Changes staged in branch: {branch_name}")
+        print(f"Branch ID: {branch_id}")
+        print(f"")
+        print(f"Next steps:")
+        print(f"  1. Review changes in NetBox UI")
+        print(f"  2. Get peer approval")
+        print(f"  3. Merge: python3 netbox/provision_site.py --merge {branch_id}")
+        print(f"{'='*60}")
+    else:
+        print(f"\nProvisioning complete (applied directly to main).")
 
 
 if __name__ == "__main__":
