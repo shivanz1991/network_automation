@@ -24,12 +24,18 @@ network_automation/    Implements the "how" — scripts, templates, playbooks
 
 ```
 network_automation/
-├── netbox/            NetBox provisioning and management scripts
+├── inventory/                  Desired state — sites and devices
+│   ├── sites.yml               Site registry with ASN slot allocation
+│   ├── DCAMER/
+│   │   └── hosts.yml           Devices at DCAMER
+│   └── EQ4LON/
+│       └── hosts.yml           Devices at EQ4LON
+├── netbox/                     NetBox provisioning scripts
 │   └── provision_site.py
-├── templates/         Jinja2 config templates for network devices
-├── playbooks/         Ansible playbooks for config deployment
-├── scripts/           Standalone utility scripts (validation, audit, etc.)
-└── requirements.txt   Python dependencies
+├── templates/                  Jinja2 config templates for network devices
+├── playbooks/                  Ansible playbooks for config deployment
+├── scripts/                    Standalone utility scripts
+└── requirements.txt            Python dependencies
 ```
 
 ### netbox/
@@ -42,18 +48,27 @@ sanctioned way to bulk-provision network data.
 |--------|---------|
 | `provision_site.py` | Reconcile NetBox state with `sites.yml` — creates, updates, or removes sites |
 
-**Workflow:**
+**Adding a site:**
 
 ```bash
-# 1. Edit sites.yml — add, modify, or remove sites/devices
-# 2. Preview changes
+# 1. Assign the next available site_id in inventory/sites.yml
+# 2. Create inventory/<SITE>/hosts.yml with device list
+# 3. Preview
 python3 netbox/provision_site.py --dry-run
 
-# 3. Apply — creates a NetBox branch for peer review
+# 4. Apply — creates a NetBox branch for peer review
 python3 netbox/provision_site.py
 
-# 4. Review in NetBox UI, get approval, then merge
+# 5. Review in NetBox UI, get approval, then merge
 python3 netbox/provision_site.py --merge <BRANCH_ID>
+```
+
+**Removing a site:**
+
+```bash
+# 1. Remove from inventory/sites.yml
+# 2. Delete inventory/<SITE>/ directory
+# 3. Run the provisioning script — it removes the site from NetBox (in a branch)
 ```
 
 **Environment variables:**

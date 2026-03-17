@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Provision and reconcile NetBox state from sites.yml.
+Provision and reconcile NetBox state from inventory/.
 
-Reads the desired state from sites.yml, derives all addressing from the
-formulas in network_standards/, and ensures NetBox matches — creating,
-updating, or removing objects as needed.
+Reads desired state from:
+  - inventory/sites.yml          Site registry (site codes + site_ids)
+  - inventory/<SITE>/hosts.yml   Device list per site
 
-All changes are made inside a NetBox branch. The branch must be manually
-reviewed and merged via the NetBox UI or API.
+Derives all addressing from network_standards/ formulas, then ensures
+NetBox matches — creating, updating, or removing objects as needed.
+
+All changes are made inside a NetBox branch for peer review before merge.
 
 Usage:
     python3 netbox/provision_site.py --dry-run
     python3 netbox/provision_site.py
     python3 netbox/provision_site.py --branch "add-eq4lon"
-    python3 netbox/provision_site.py --merge  # merge the branch after review
+    python3 netbox/provision_site.py --merge 3
 
 Environment variables:
     NETBOX_URL    - NetBox base URL (default: http://192.168.0.36)
@@ -32,7 +34,8 @@ import yaml
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(SCRIPT_DIR)
-SITES_FILE = os.path.join(REPO_DIR, "sites.yml")
+INVENTORY_DIR = os.path.join(REPO_DIR, "inventory")
+SITES_FILE = os.path.join(INVENTORY_DIR, "sites.yml")
 
 
 # ---------------------------------------------------------------------------
@@ -565,21 +568,35 @@ def reconcile(nb, desired_sites: dict, dry_run: bool = False):
 # CLI
 # ---------------------------------------------------------------------------
 
-def load_sites(path: str) -> dict:
-    with open(path) as f:
+def load_sites(inventory_dir: str) -> dict:
+    """Load sites from inventory/sites.yml and per-site hosts.yml files."""
+    sites_file = os.path.join(inventory_dir, "sites.yml")
+    with open(sites_file) as f:
         data = yaml.safe_load(f)
-    sites = data.get("sites", {})
 
-    for code, cfg in sites.items():
-        sid = cfg.get("site_id")
-        if sid is None:
-            raise ValueError(f"Site {code} missing site_id")
-        if sid < 0 or sid > 190:
-            raise ValueError(f"Site {code}: site_id must be 0-190, got {sid}")
-        if sid % 2 != 0:
-            raise ValueError(f"Site {code}: site_id must be even, got {sid}")
-        if len(code) != 6 and len(code) != 5:
-            print(f"  Warning: site code '{code}' is not 5-6 characters", file=sys.stderr)
+    sites = {}
+    for region_name, region_cfg in data.get("regions", {}).items():
+        for site_code, site_id in (region_cfg.get("sites") or {}).items():
+            if site_id is None:
+                continue
+            if site_id < 0 or site_id > 190:
+                raise ValueError(f"Site {site_code}: site_id must be 0-190, got {site_id}")
+            if site_id % 2 != 0:
+                raise ValueError(f"Site {site_code}: site_id must be even, got {site_id}")
+
+            hosts_file = os.path.join(inventory_dir, site_code, "hosts.yml")
+            if not os.path.exists(hosts_file):
+                raise FileNotFoundError(
+                    f"Site {site_code} defined in sites.yml but missing {hosts_file}"
+                )
+
+            with open(hosts_file) as f:
+                hosts_data = yaml.safe_load(f)
+
+            sites[site_code] = {
+                "site_id": site_id,
+                "devices": hosts_data.get("devices", []),
+            }
 
     return sites
 
@@ -592,8 +609,8 @@ def main():
                         help="NetBox URL")
     parser.add_argument("--token", default=os.environ.get("NETBOX_TOKEN"),
                         help="NetBox API token")
-    parser.add_argument("--sites-file", default=SITES_FILE,
-                        help="Path to sites.yml")
+    parser.add_argument("--inventory", default=INVENTORY_DIR,
+                        help="Path to inventory directory")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be created without making changes")
     parser.add_argument("--branch", default=None,
@@ -612,7 +629,7 @@ def main():
         print(f"Merge job submitted: {result.get('id', 'unknown')}")
         return
 
-    sites = load_sites(args.sites_file)
+    sites = load_sites(args.inventory)
 
     if args.dry_run:
         reconcile(None, sites, dry_run=True)

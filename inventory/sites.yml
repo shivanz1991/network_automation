@@ -1,0 +1,44 @@
+# Site Registry — ASN Allocation
+#
+# Each region has 64 site_ids (32 sites, even IDs only).
+# ASN = 65000 + site_id
+#
+# To add a new site:
+#   1. Assign the next available even site_id in the correct region
+#   2. Create a directory: inventory/<SITE>/hosts.yml
+#   3. Run: python3 netbox/provision_site.py --dry-run
+#
+# To decommission a site:
+#   1. Remove its entry below
+#   2. Delete its directory: inventory/<SITE>/
+#   3. Run the provisioning script — it will remove the site from NetBox
+
+regions:
+  AMER:
+    range: 0-63
+    sites:
+      DCAMER: 0
+      # 2: available
+      # 4: available
+      # 6: available
+      # 8: available
+      # 10: available
+
+  EMEA:
+    range: 64-127
+    sites:
+      EQ4LON: 64
+      # 66: available
+      # 68: available
+      # 70: available
+      # 72: available
+      # 74: available
+
+  APAC:
+    range: 128-191
+    sites:
+      # 128: available
+      # 130: available
+      # 132: available
+      # 134: available
+      # 136: available
