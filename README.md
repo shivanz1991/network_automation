@@ -24,9 +24,9 @@ network_automation/    Implements the "how" — scripts, templates, playbooks
 
 ```
 network_automation/
-├── inventory/                  Desired state — sites and devices
-│   ├── sites.yml               Site registry with ASN slot allocation
+├── inventory/                  Desired state
 │   └── sites/
+│       ├── sites.yml           Site registry with ASN slot allocation
 │       ├── DCAMER/
 │       │   └── hosts.yml       Devices at DCAMER
 │       └── EQ4LON/

@@ -35,7 +35,8 @@ import yaml
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(SCRIPT_DIR)
 INVENTORY_DIR = os.path.join(REPO_DIR, "inventory")
-SITES_FILE = os.path.join(INVENTORY_DIR, "sites.yml")
+SITES_DIR = os.path.join(INVENTORY_DIR, "sites")
+SITES_FILE = os.path.join(SITES_DIR, "sites.yml")
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +571,8 @@ def reconcile(nb, desired_sites: dict, dry_run: bool = False):
 
 def load_sites(inventory_dir: str) -> dict:
     """Load sites from inventory/sites.yml and per-site hosts.yml files."""
-    sites_file = os.path.join(inventory_dir, "sites.yml")
+    sites_dir = os.path.join(inventory_dir, "sites")
+    sites_file = os.path.join(sites_dir, "sites.yml")
     with open(sites_file) as f:
         data = yaml.safe_load(f)
 
@@ -584,7 +586,7 @@ def load_sites(inventory_dir: str) -> dict:
             if site_id % 2 != 0:
                 raise ValueError(f"Site {site_code}: site_id must be even, got {site_id}")
 
-            hosts_file = os.path.join(inventory_dir, "sites", site_code, "hosts.yml")
+            hosts_file = os.path.join(sites_dir, site_code, "hosts.yml")
             if not os.path.exists(hosts_file):
                 raise FileNotFoundError(
                     f"Site {site_code} defined in sites.yml but missing {hosts_file}"
