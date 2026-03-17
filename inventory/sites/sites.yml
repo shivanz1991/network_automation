@@ -1,4 +1,4 @@
-# Site Registry — ASN Allocation
+# Site Registry -- ASN Allocation
 #
 # Each region has 64 site_ids (32 sites, even IDs only).
 # ASN = 65000 + site_id
@@ -11,7 +11,7 @@
 # To decommission a site:
 #   1. Remove its entry below
 #   2. Delete its directory: inventory/sites/<SITE>/
-#   3. Run the provisioning script — it will remove the site from NetBox
+#   3. Run the provisioning script -- it will remove the site from NetBox
 
 regions:
   AMER:
@@ -27,7 +27,7 @@ regions:
   EMEA:
     range: 64-127
     sites:
-      EQ4LON: 64
+      DCEMEA: 64
       # 66: available
       # 68: available
       # 70: available

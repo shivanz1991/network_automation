@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: network-automation
+Version: 0.1.0
+Summary: NetBox provisioning and network automation tooling
+Requires-Python: >=3.10
+Requires-Dist: pynetbox>=7.0.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: requests>=2.20.0
