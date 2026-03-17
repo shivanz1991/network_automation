@@ -5,12 +5,12 @@
 #
 # To add a new site:
 #   1. Assign the next available even site_id in the correct region
-#   2. Create a directory: inventory/<SITE>/hosts.yml
+#   2. Create a directory: inventory/sites/<SITE>/hosts.yml
 #   3. Run: python3 netbox/provision_site.py --dry-run
 #
 # To decommission a site:
 #   1. Remove its entry below
-#   2. Delete its directory: inventory/<SITE>/
+#   2. Delete its directory: inventory/sites/<SITE>/
 #   3. Run the provisioning script — it will remove the site from NetBox
 
 regions:

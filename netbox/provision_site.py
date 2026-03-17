@@ -584,7 +584,7 @@ def load_sites(inventory_dir: str) -> dict:
             if site_id % 2 != 0:
                 raise ValueError(f"Site {site_code}: site_id must be even, got {site_id}")
 
-            hosts_file = os.path.join(inventory_dir, site_code, "hosts.yml")
+            hosts_file = os.path.join(inventory_dir, "sites", site_code, "hosts.yml")
             if not os.path.exists(hosts_file):
                 raise FileNotFoundError(
                     f"Site {site_code} defined in sites.yml but missing {hosts_file}"

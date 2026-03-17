@@ -26,10 +26,11 @@ network_automation/    Implements the "how" — scripts, templates, playbooks
 network_automation/
 ├── inventory/                  Desired state — sites and devices
 │   ├── sites.yml               Site registry with ASN slot allocation
-│   ├── DCAMER/
-│   │   └── hosts.yml           Devices at DCAMER
-│   └── EQ4LON/
-│       └── hosts.yml           Devices at EQ4LON
+│   └── sites/
+│       ├── DCAMER/
+│       │   └── hosts.yml       Devices at DCAMER
+│       └── EQ4LON/
+│           └── hosts.yml       Devices at EQ4LON
 ├── netbox/                     NetBox provisioning scripts
 │   └── provision_site.py
 ├── templates/                  Jinja2 config templates for network devices
@@ -52,7 +53,7 @@ sanctioned way to bulk-provision network data.
 
 ```bash
 # 1. Assign the next available site_id in inventory/sites.yml
-# 2. Create inventory/<SITE>/hosts.yml with device list
+# 2. Create inventory/sites/<SITE>/hosts.yml with device list
 # 3. Preview
 python3 netbox/provision_site.py --dry-run
 
@@ -67,7 +68,7 @@ python3 netbox/provision_site.py --merge <BRANCH_ID>
 
 ```bash
 # 1. Remove from inventory/sites.yml
-# 2. Delete inventory/<SITE>/ directory
+# 2. Delete inventory/sites/<SITE>/ directory
 # 3. Run the provisioning script — it removes the site from NetBox (in a branch)
 ```
 
