@@ -14,10 +14,11 @@ from netbox.constants import (
     HTCOLO_VLANS,
     INTRA_SITE_OFFSET,
     LOCAL_SUPERNETS,
+    REGION_INDEX,
     REGIONS,
     SVI_OFFSETS,
-    WAN_HUBS_PER_REGION,
     WAN_P2P_BASE,
+    WAN_VLAN_BASE,
 )
 
 
@@ -106,34 +107,33 @@ def derive_device_ips(device_name: str, vlan_prefixes: list) -> dict:
     return ips
 
 
-def derive_wan_p2p(site_id: int, region_cfg: dict) -> list:
-    """Derive WAN point-to-point /30 links for a site."""
+def derive_wan_p2p(site_id: int, region_name: str, region_cfg: dict) -> list:
+    """Derive WAN point-to-point /30 links for a site (1 hub per region)."""
     pair_index = (site_id - region_cfg["start"]) // 2
-    region_offset = region_cfg["start"]
+    if pair_index == 0:
+        return []
+    region_idx = REGION_INDEX[region_name]
+    base_net = int(WAN_P2P_BASE.network_address)
     links = []
-    for hub_index in range(WAN_HUBS_PER_REGION):
-        for side, side_offset in [("A", 0), ("B", 32)]:
-            third_octet = region_offset + side_offset + hub_index
-            fourth_octet = pair_index * 4
-            base = (
-                int(WAN_P2P_BASE.network_address)
-                + (third_octet * 256)
-                + fourth_octet
-            )
-            links.append({
-                "hub_index": hub_index,
-                "side": side,
-                "prefix": ipaddress.IPv4Network(
-                    f"{ipaddress.IPv4Address(base)}/30"
-                ),
-                "hub_ip": ipaddress.IPv4Address(base + 1),
-                "colo_ip": ipaddress.IPv4Address(base + 2),
-            })
+    for side, side_offset in [("A", 0), ("B", 1)]:
+        third_octet = (region_idx * 2) + side_offset
+        fourth_octet = pair_index * 4
+        base = base_net + (third_octet * 256) + fourth_octet
+        vlan_id = WAN_VLAN_BASE + site_id + side_offset
+        links.append({
+            "side": side,
+            "vlan_id": vlan_id,
+            "prefix": ipaddress.IPv4Network(
+                f"{ipaddress.IPv4Address(base)}/30"
+            ),
+            "hub_ip": ipaddress.IPv4Address(base + 1),
+            "colo_ip": ipaddress.IPv4Address(base + 2),
+        })
     return links
 
 
 def parse_device_name(name: str) -> dict:
-    """Parse a device prefix like MGTSW1A into structured components."""
+    """Parse a device prefix like INFSW1A into structured components."""
     for prefix, catalog in DEVICE_CATALOG.items():
         if name.startswith(prefix):
             remainder = name[len(prefix):]

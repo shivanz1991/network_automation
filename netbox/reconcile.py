@@ -35,7 +35,7 @@ def provision_site(nb, site_code: str, site_id: int, device_names: list):
     """Create or verify all NetBox objects for a single site."""
     region_name, region_cfg = get_region(site_id)
     addr = derive_site_addressing(site_id, region_cfg)
-    wan_links = derive_wan_p2p(site_id, region_cfg)
+    wan_links = derive_wan_p2p(site_id, region_name, region_cfg)
 
     print(
         f"\n--- {site_code} "
@@ -75,10 +75,10 @@ def provision_site(nb, site_code: str, site_id: int, device_names: list):
     )
     ensure_prefix(
         nb, str(addr["ibgp_prefix"]), nb_site["id"],
-        role_intra["id"], f"{site_code} iBGP MGTSW1A-MGTSW1B",
+        role_intra["id"], f"{site_code} iBGP INFSW1A-INFSW1B",
     )
-    ensure_ip(nb, f"{addr['ibgp_a']}/30", f"MGTSW1A-{site_code} iBGP")
-    ensure_ip(nb, f"{addr['ibgp_b']}/30", f"MGTSW1B-{site_code} iBGP")
+    ensure_ip(nb, f"{addr['ibgp_a']}/30", f"INFSW1A-{site_code} iBGP")
+    ensure_ip(nb, f"{addr['ibgp_b']}/30", f"INFSW1B-{site_code} iBGP")
 
     ensure_prefix(
         nb, str(addr["netinfra_prefix"]), nb_site["id"],
@@ -92,17 +92,22 @@ def provision_site(nb, site_code: str, site_id: int, device_names: list):
         )
 
     for link in wan_links:
-        desc = f"{site_code} Hub{link['hub_index']}-{link['side']}"
+        wan_vlan = ensure_vlan(
+            nb, vlan_group["id"], link["vlan_id"],
+            f"WAN_{site_code}_{link['side']}",
+        )
+        desc = f"{site_code} Hub-{link['side']} VLAN {link['vlan_id']}"
         ensure_prefix(
             nb, str(link["prefix"]), nb_site["id"], role_p2p["id"], desc,
+            vlan_id=wan_vlan["id"],
         )
         ensure_ip(
             nb, f"{link['hub_ip']}/30",
-            f"Hub{link['hub_index']}-{link['side']} -> {site_code}",
+            f"Hub-{link['side']} -> {site_code}",
         )
         ensure_ip(
             nb, f"{link['colo_ip']}/30",
-            f"{site_code} -> Hub{link['hub_index']}-{link['side']}",
+            f"{site_code} -> Hub-{link['side']}",
         )
 
     roles_cache = {}
@@ -239,7 +244,7 @@ def _dry_run(desired_sites: dict):
         devices = cfg.get("devices", [])
         region_name, region_cfg = get_region(site_id)
         addr = derive_site_addressing(site_id, region_cfg)
-        wan_links = derive_wan_p2p(site_id, region_cfg)
+        wan_links = derive_wan_p2p(site_id, region_name, region_cfg)
 
         print(
             f"--- {site_code} "
@@ -250,6 +255,14 @@ def _dry_run(desired_sites: dict):
         print(f"  iBGP:        {addr['ibgp_a']} <-> {addr['ibgp_b']}")
         for name, prefix in addr["local_prefixes"].items():
             print(f"  {name:20s} {prefix}")
-        print(f"  WAN P2P:     {len(wan_links)} links")
+        if wan_links:
+            print(f"  WAN P2P:     {len(wan_links)} links")
+            for link in wan_links:
+                print(
+                    f"    {link['side']}-side  VLAN {link['vlan_id']}  "
+                    f"{link['prefix']}  hub {link['hub_ip']}  colo {link['colo_ip']}"
+                )
+        else:
+            print(f"  WAN P2P:     hub site (no colo links)")
         print(f"  Devices:     {', '.join(devices)}")
         print()

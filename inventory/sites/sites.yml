@@ -28,7 +28,7 @@ regions:
     range: 64-127
     sites:
       DCEMEA: 64
-      # 66: available
+      EQ4LON: 66
       # 68: available
       # 70: available
       # 72: available

@@ -170,7 +170,7 @@ Templates pull variables from NetBox at render time -- no hardcoded IPs
 or site-specific data.
 
 Planned templates:
-- `mgtsw.j2` -- Management switch (MGTSW) full config
+- `infsw.j2` -- Infrastructure switch (INFSW) full config
 - `trdsw.j2` -- Trading switch config
 - `infsw.j2` -- Infrastructure switch config
 

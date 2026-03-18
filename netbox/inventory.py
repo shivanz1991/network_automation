@@ -15,7 +15,7 @@ def load_sites(inventory_dir: str) -> dict:
     """Load all sites and their devices from the inventory directory.
 
     Returns a dict keyed by site code:
-        {"DCAMER": {"site_id": 0, "devices": ["MGTSW1A-DCAMER", ...]}, ...}
+        {"DCAMER": {"site_id": 0, "devices": ["INFSW1A-DCAMER", ...]}, ...}
     """
     sites_dir = os.path.join(inventory_dir, "sites")
     sites_file = os.path.join(sites_dir, "sites.yml")
