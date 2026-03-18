@@ -3,10 +3,14 @@
 # Each region has 64 site_ids (32 sites, even IDs only).
 # ASN = 65000 + site_id
 #
+# Site grouping: pair_index 0 = hub, all others = spoke
+# Hub sites are regional aggregation points (WAN backbone).
+# Spoke sites connect to the regional hub via intra-region WAN.
+#
 # To add a new site:
 #   1. Assign the next available even site_id in the correct region
 #   2. Create a directory: inventory/sites/<SITE>/hosts.yml
-#   3. Run: python3 netbox/provision_site.py --dry-run
+#   3. Run: provision <SITE> --dry-run
 #
 # To decommission a site:
 #   1. Remove its entry below
@@ -17,28 +21,28 @@ regions:
   AMER:
     range: 0-63
     sites:
-      DCAMER: 0
-      # 2: available
-      # 4: available
-      # 6: available
-      # 8: available
-      # 10: available
+      DCAMER: 0       # hub
+      # 2: available  (spoke)
+      # 4: available  (spoke)
+      # 6: available  (spoke)
+      # 8: available  (spoke)
+      # 10: available (spoke)
 
   EMEA:
     range: 64-127
     sites:
-      DCEMEA: 64
-      EQ4LON: 66
-      # 68: available
-      # 70: available
-      # 72: available
-      # 74: available
+      DCEMEA: 64      # hub
+      EQ4LON: 66      # spoke
+      # 68: available  (spoke)
+      # 70: available  (spoke)
+      # 72: available  (spoke)
+      # 74: available  (spoke)
 
   APAC:
     range: 128-191
     sites:
-      # 128: available
-      # 130: available
-      # 132: available
-      # 134: available
-      # 136: available
+      # 128: available (hub)
+      # 130: available (spoke)
+      # 132: available (spoke)
+      # 134: available (spoke)
+      # 136: available (spoke)

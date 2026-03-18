@@ -172,7 +172,6 @@ or site-specific data.
 Planned templates:
 - `infsw.j2` -- Infrastructure switch (INFSW) full config
 - `trdsw.j2` -- Trading switch config
-- `infsw.j2` -- Infrastructure switch config
 
 ### playbooks/
 
@@ -204,8 +203,8 @@ Key standards documents:
 | `sites.md` | Site naming convention ({DC}{CITY}), site registry, ASN assignment |
 | `devices.md` | Device naming ({ROLE}{TYPE}{CAB}{SIDE}-{SITE}), IP offsets, L2/L3 behavior |
 | `ip-addressing/site-addressing.md` | Per-site htcolo /21 and netinfra /24 derivation |
-| `ip-addressing/wan-p2p.md` | Hub-to-colo /30 links |
-| `ip-addressing/wan-regional.md` | Inter-region WAN /30 links (10.255.0.0/20) |
+| `ip-addressing/wan-intra-region.md` | Hub-to-colo (intra-region) /30 links |
+| `ip-addressing/wan-inter-region.md` | Hub-to-hub (inter-region) WAN /30 links (10.255.0.0/20) |
 | `vlans/standard-vlans.md` | VLAN ID assignments |
 | `automation.md` | Pipeline architecture (NetBox -> Ansible) |
 

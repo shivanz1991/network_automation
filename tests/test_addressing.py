@@ -5,7 +5,7 @@ import unittest
 
 from netbox.addressing import (
     derive_site_addressing,
-    derive_wan_p2p,
+    derive_wan_intra,
     get_region,
     parse_device_name,
 )
@@ -36,7 +36,7 @@ class TestParseDeviceName(unittest.TestCase):
     def test_infsw1a(self):
         dev = parse_device_name("INFSW1A")
         self.assertEqual(dev["prefix"], "INFSW")
-        self.assertEqual(dev["role"], "Infrastructure")
+        self.assertEqual(dev["role"], "INFSW")
         self.assertEqual(dev["cabinet"], 1)
         self.assertEqual(dev["side"], "A")
         self.assertEqual(dev["side_offset"], 0)
@@ -44,7 +44,7 @@ class TestParseDeviceName(unittest.TestCase):
     def test_trdsw2b(self):
         dev = parse_device_name("TRDSW2B")
         self.assertEqual(dev["prefix"], "TRDSW")
-        self.assertEqual(dev["role"], "Trading")
+        self.assertEqual(dev["role"], "TRDSW")
         self.assertEqual(dev["cabinet"], 2)
         self.assertEqual(dev["side"], "B")
         self.assertEqual(dev["side_offset"], 1)
@@ -52,12 +52,12 @@ class TestParseDeviceName(unittest.TestCase):
     def test_timeserver1a(self):
         dev = parse_device_name("TIMESERVER1A")
         self.assertEqual(dev["prefix"], "TIMESERVER")
-        self.assertEqual(dev["role"], "PTP")
+        self.assertEqual(dev["role"], "TIMESERVER")
         self.assertEqual(dev["type"], "Server")
 
     def test_console1b(self):
         dev = parse_device_name("CONSOLE1B")
-        self.assertEqual(dev["role"], "OOB")
+        self.assertEqual(dev["role"], "CONSOLE")
 
     def test_unknown_raises(self):
         with self.assertRaises(ValueError):
@@ -104,30 +104,30 @@ class TestDeriveWanP2P(unittest.TestCase):
 
     def test_hub_has_no_links(self):
         name, region_cfg = get_region(0)
-        links = derive_wan_p2p(0, name, region_cfg)
+        links = derive_wan_intra(0, name, region_cfg)
         self.assertEqual(len(links), 0)
 
     def test_colo_has_two_links(self):
         name, region_cfg = get_region(2)
-        links = derive_wan_p2p(2, name, region_cfg)
+        links = derive_wan_intra(2, name, region_cfg)
         self.assertEqual(len(links), 2)
 
     def test_links_are_slash30(self):
         name, region_cfg = get_region(2)
-        links = derive_wan_p2p(2, name, region_cfg)
+        links = derive_wan_intra(2, name, region_cfg)
         for link in links:
             self.assertEqual(link["prefix"].prefixlen, 30)
 
     def test_hub_and_colo_in_same_prefix(self):
         name, region_cfg = get_region(2)
-        links = derive_wan_p2p(2, name, region_cfg)
+        links = derive_wan_intra(2, name, region_cfg)
         for link in links:
             self.assertIn(link["hub_ip"], link["prefix"])
             self.assertIn(link["colo_ip"], link["prefix"])
 
     def test_amer_colo_addresses(self):
         name, region_cfg = get_region(2)
-        links = derive_wan_p2p(2, name, region_cfg)
+        links = derive_wan_intra(2, name, region_cfg)
         a_link = [l for l in links if l["side"] == "A"][0]
         b_link = [l for l in links if l["side"] == "B"][0]
         self.assertEqual(a_link["prefix"], ipaddress.IPv4Network("10.0.0.4/30"))
@@ -135,7 +135,7 @@ class TestDeriveWanP2P(unittest.TestCase):
 
     def test_emea_colo_addresses(self):
         name, region_cfg = get_region(66)
-        links = derive_wan_p2p(66, name, region_cfg)
+        links = derive_wan_intra(66, name, region_cfg)
         a_link = [l for l in links if l["side"] == "A"][0]
         b_link = [l for l in links if l["side"] == "B"][0]
         self.assertEqual(a_link["prefix"], ipaddress.IPv4Network("10.0.2.4/30"))
@@ -143,7 +143,7 @@ class TestDeriveWanP2P(unittest.TestCase):
 
     def test_amer_wan_vlans(self):
         name, region_cfg = get_region(2)
-        links = derive_wan_p2p(2, name, region_cfg)
+        links = derive_wan_intra(2, name, region_cfg)
         a_link = [l for l in links if l["side"] == "A"][0]
         b_link = [l for l in links if l["side"] == "B"][0]
         self.assertEqual(a_link["vlan_id"], 1002)
@@ -151,7 +151,7 @@ class TestDeriveWanP2P(unittest.TestCase):
 
     def test_emea_wan_vlans(self):
         name, region_cfg = get_region(66)
-        links = derive_wan_p2p(66, name, region_cfg)
+        links = derive_wan_intra(66, name, region_cfg)
         a_link = [l for l in links if l["side"] == "A"][0]
         b_link = [l for l in links if l["side"] == "B"][0]
         self.assertEqual(a_link["vlan_id"], 1066)
@@ -159,7 +159,7 @@ class TestDeriveWanP2P(unittest.TestCase):
 
     def test_apac_wan_vlans(self):
         name, region_cfg = get_region(130)
-        links = derive_wan_p2p(130, name, region_cfg)
+        links = derive_wan_intra(130, name, region_cfg)
         a_link = [l for l in links if l["side"] == "A"][0]
         b_link = [l for l in links if l["side"] == "B"][0]
         self.assertEqual(a_link["vlan_id"], 1130)

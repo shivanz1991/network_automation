@@ -10,7 +10,7 @@ Handles three operations:
 from netbox.addressing import (
     derive_device_ips,
     derive_site_addressing,
-    derive_wan_p2p,
+    derive_wan_intra,
     get_region,
     parse_device_name,
 )
@@ -26,6 +26,7 @@ from netbox.resources import (
     ensure_region,
     ensure_rir,
     ensure_site,
+    ensure_site_group,
     ensure_vlan,
     ensure_vlan_group,
 )
@@ -35,7 +36,7 @@ def provision_site(nb, site_code: str, site_id: int, device_names: list):
     """Create or verify all NetBox objects for a single site."""
     region_name, region_cfg = get_region(site_id)
     addr = derive_site_addressing(site_id, region_cfg)
-    wan_links = derive_wan_p2p(site_id, region_name, region_cfg)
+    wan_links = derive_wan_intra(site_id, region_name, region_cfg)
 
     print(
         f"\n--- {site_code} "
@@ -43,7 +44,9 @@ def provision_site(nb, site_code: str, site_id: int, device_names: list):
     )
 
     nb_region = ensure_region(nb, region_name)
-    nb_site = ensure_site(nb, site_code, nb_region["id"])
+    group_name = "hub" if addr["pair_index"] == 0 else "spoke"
+    nb_group = ensure_site_group(nb, group_name)
+    nb_site = ensure_site(nb, site_code, nb_region["id"], nb_group["id"])
     rir = ensure_rir(nb)
     ensure_asn(nb, addr["asn"], rir["id"], nb_site["id"])
 
@@ -55,7 +58,7 @@ def provision_site(nb, site_code: str, site_id: int, device_names: list):
     role_htcolo = ensure_prefix_role(nb, "htcolo", "htcolo")
     role_netinfra = ensure_prefix_role(nb, "netinfra", "netinfra")
     role_local = ensure_prefix_role(nb, "local", "local")
-    role_p2p = ensure_prefix_role(nb, "wan-p2p", "wan-p2p")
+    role_p2p = ensure_prefix_role(nb, "wan-intra-region", "wan-intra-region")
     role_intra = ensure_prefix_role(nb, "intra-site", "intra-site")
 
     ensure_prefix(
@@ -244,11 +247,12 @@ def _dry_run(desired_sites: dict):
         devices = cfg.get("devices", [])
         region_name, region_cfg = get_region(site_id)
         addr = derive_site_addressing(site_id, region_cfg)
-        wan_links = derive_wan_p2p(site_id, region_name, region_cfg)
+        wan_links = derive_wan_intra(site_id, region_name, region_cfg)
 
+        group_name = "hub" if addr["pair_index"] == 0 else "spoke"
         print(
             f"--- {site_code} "
-            f"(site_id={site_id}, {region_name}, ASN {addr['asn']}) ---"
+            f"(site_id={site_id}, {region_name}, {group_name}, ASN {addr['asn']}) ---"
         )
         print(f"  htcolo /21:  {addr['htcolo_prefix']}")
         print(f"  netinfra:    {addr['netinfra_prefix']}")
@@ -256,13 +260,13 @@ def _dry_run(desired_sites: dict):
         for name, prefix in addr["local_prefixes"].items():
             print(f"  {name:20s} {prefix}")
         if wan_links:
-            print(f"  WAN P2P:     {len(wan_links)} links")
+            print(f"  WAN Intra:   {len(wan_links)} links")
             for link in wan_links:
                 print(
                     f"    {link['side']}-side  VLAN {link['vlan_id']}  "
                     f"{link['prefix']}  hub {link['hub_ip']}  colo {link['colo_ip']}"
                 )
         else:
-            print(f"  WAN P2P:     hub site (no colo links)")
+            print(f"  WAN Intra:   hub site (no spoke links)")
         print(f"  Devices:     {', '.join(devices)}")
         print()

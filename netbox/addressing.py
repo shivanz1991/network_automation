@@ -17,7 +17,7 @@ from netbox.constants import (
     REGION_INDEX,
     REGIONS,
     SVI_OFFSETS,
-    WAN_P2P_BASE,
+    WAN_INTRA_BASE,
     WAN_VLAN_BASE,
 )
 
@@ -107,13 +107,13 @@ def derive_device_ips(device_name: str, vlan_prefixes: list) -> dict:
     return ips
 
 
-def derive_wan_p2p(site_id: int, region_name: str, region_cfg: dict) -> list:
-    """Derive WAN point-to-point /30 links for a site (1 hub per region)."""
+def derive_wan_intra(site_id: int, region_name: str, region_cfg: dict) -> list:
+    """Derive intra-region WAN /30 links for a site (1 hub per region)."""
     pair_index = (site_id - region_cfg["start"]) // 2
     if pair_index == 0:
         return []
     region_idx = REGION_INDEX[region_name]
-    base_net = int(WAN_P2P_BASE.network_address)
+    base_net = int(WAN_INTRA_BASE.network_address)
     links = []
     for side, side_offset in [("A", 0), ("B", 1)]:
         third_octet = (region_idx * 2) + side_offset

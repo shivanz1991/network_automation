@@ -20,14 +20,27 @@ def ensure_region(nb, region_name):
     return result
 
 
-def ensure_site(nb, site_code, region_id):
+def ensure_site_group(nb, name):
+    slug = name.lower()
+    existing = nb.get_or_none("dcim/site-groups/", slug=slug)
+    if existing:
+        return existing
+    result = nb.post("dcim/site-groups/", {"name": name, "slug": slug})
+    print(f"  + Site Group: {name}")
+    return result
+
+
+def ensure_site(nb, site_code, region_id, group_id=None):
     slug = site_code.lower()
     existing = nb.get_or_none("dcim/sites/", slug=slug)
     if existing:
         return existing
-    result = nb.post("dcim/sites/", {
+    data = {
         "name": site_code, "slug": slug, "region": region_id, "status": "planned",
-    })
+    }
+    if group_id:
+        data["group"] = group_id
+    result = nb.post("dcim/sites/", data)
     print(f"  + Site: {site_code}")
     return result
 

@@ -35,18 +35,20 @@ SITE_VLANS = [
     (3000, "INFSW_IBGP"), (3050, "TRDSW_INTERLINK"), (3100, "INFRA_AB_INTERLINK"),
 ]
 
+SITE_GROUPS = ["hub", "spoke"]
+
 DEVICE_CATALOG = {
-    "INFSW":      {"role": "Infrastructure",   "type": "Switch", "offsets": {1: 57, 2: 67, 3: 77, 4: 87}},
-    "TRDSW":      {"role": "Trading",          "type": "Switch", "offsets": {1: 63, 2: 73, 3: 83, 4: 93}},
-    "TIMESERVER": {"role": "PTP",              "type": "Server", "offsets": {1: 30}},
-    "PTPSW":      {"role": "PTP",              "type": "Switch", "offsets": {1: 32}},
-    "CONSOLE":    {"role": "OOB",              "type": "Server", "offsets": {1: 34}},
+    "INFSW":      {"role": "INFSW",      "type": "Switch", "offsets": {1: 57, 2: 67, 3: 77, 4: 87}},
+    "TRDSW":      {"role": "TRDSW",      "type": "Switch", "offsets": {1: 63, 2: 73, 3: 83, 4: 93}},
+    "TIMESERVER": {"role": "TIMESERVER", "type": "Server", "offsets": {1: 30}},
+    "PTPSW":      {"role": "PTPSW",      "type": "Switch", "offsets": {1: 32}},
+    "CONSOLE":    {"role": "CONSOLE",    "type": "Server", "offsets": {1: 34}},
 }
 
 SVI_OFFSETS = {"A": 3, "B": 2, "VRRP": 1}
 
 INTRA_SITE_OFFSET = 4
-WAN_P2P_BASE = ipaddress.IPv4Network("10.0.0.0/21")
+WAN_INTRA_BASE = ipaddress.IPv4Network("10.0.0.0/21")
 REGION_INDEX = {"AMER": 0, "EMEA": 1, "APAC": 2}
 ASN_BASE = 65000
 WAN_VLAN_BASE = 1000
